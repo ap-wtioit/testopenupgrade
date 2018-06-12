@@ -4,7 +4,7 @@ BASEDIR=$(pwd)
 timestamp=$(date +%s)
 database_name="oodo_$timestamp"
 database_user=$USER
-branch_dir="$(pwd)/openupgrade_$timestamp"
+branch_dir="$(pwd)/upgrades/openupgrade_$timestamp"
 #versions[0]=8.0
 #versions[1]=9.0
 versions[2]=10.0
@@ -40,8 +40,16 @@ for version in ${versions[@]}; do
             else
                 ODOO_BIN=$branch_dir/$version/server/odoo-bin
             fi
-            $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $branch_dir/$version/server.cfg --test-enable --log-level=test
-            echo $?
+            cp $ODOO_CONFIG $branch_dir/$version/odoo.cfg
+            new_addonspath=$(grep -R addons_path $branch_dir/$version/server.cfg)
+            sed 's/^addons_path = .*$/${new_addonspath}/' $branch_dir/$version/odoo.cfg
+            echo "root_path = $branch_dir/$version/server" >> $branch_dir/$version/odoo.cfg
+            $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $branch_dir/$version/odoo.cfg --test-enable --log-level=test
+            result=$?
+            if [ "$result" != "0" ] ; then
+                echo "Tests failed after upgrade" 1>&2
+                exit 4
+            fi
         else
             echo "Upgrade failed" 1>&2
             exit 2
@@ -74,12 +82,12 @@ for version in ${versions[@]}; do
         if [ "$?" == "0" ] ; then
             echo "Install OK, running post install tests"
             # odoo 9.0 loves to generate this config file (which then takes precedence over the given config!)
-            rm ~/.openerp_serverrc
+            if [ -e ~/.openerp_serverrc ] ; then rm ~/.openerp_serverrc; fi
             $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $ODOO_CONFIG --test-enable --log-level=test
             result=$?
             if [ "$result" != "0" ] ; then
                 echo "Tests installation failed ($result)" 1>&2
-                exit 4
+                exit 3
             fi
             cd $BASEDIR
             pwd
