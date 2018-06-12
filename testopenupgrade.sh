@@ -6,7 +6,7 @@ database_name="oodo_$timestamp"
 database_user=$USER
 branch_dir="$(pwd)/upgrades/openupgrade_$timestamp"
 #versions[0]=8.0
-versions[1]=9.0
+#versions[1]=9.0
 versions[2]=10.0
 versions[3]=11.0
 
@@ -61,18 +61,23 @@ for version in ${versions[@]}; do
             ln -s $data_dir/filestore/${database_name} $data_dir/filestore/${database_name}_${major_version}
             database_name="${database_name}_${major_version}"
             echo "Running Tests"
-            cd $BASEDIR
-            cd $ODOO_DIR
-            git checkout $version
+            git clone $BASEDIR/$ODOO_DIR --branch $version --single-branch $branch_dir/$version/odoo
+            cd $branch_dir/$version/odoo
             if [ -e openerp-server ] ; then
                 ODOO_BIN=./openerp-server
             else
                 ODOO_BIN=./odoo-bin
             fi
-            $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $ODOO_CONFIG --test-enable --log-level=test
-            result=$?
-            if [ "$result" != "0" ] ; then
-                echo "Tests failed after upgrade" 1>&2
+
+            sed 's/\(openupgrade_[^\/]*\/\)[0-9]*\.[0-9]/\1'$version'/g' $ODOO_CONFIG > $branch_dir/odoo$version.conf
+
+            if [ "${version:0:1}" == "1" ] ; then
+                # make sure addons directory points to odoo for versions 10 and 11
+                sed -i 's/openerp/odoo/g' $branch_dir/odoo$version.conf
+            fi
+            $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $branch_dir/odoo$version.conf --test-enable --log-level=test | tee ../test.log
+            if [ "${PIPESTATUS[0]}" != "0" ] ; then
+                echo "Tests failed after upgrade (${PIPESTATUS[0]})" 1>&2
                 exit 4
             fi
         else
@@ -82,13 +87,8 @@ for version in ${versions[@]}; do
     else
         echo "Installing version $version"
         psql postgres $USER -c "create database $database_name"
-        cd $ODOO_DIR
-        git fetch
-        if ! git checkout $version; then
-            git checkout $REMOTE/$version
-            git checkout -b $version
-        fi
-        git clean -fd
+        git clone $ODOO_DIR --branch $version --single-branch $branch_dir/$version/odoo
+        cd $branch_dir/$version/odoo
         if [ ! -e $BASEDIR/venv$version ]; then
             virtualenv --python=${python_version[$major_version]} $BASEDIR/venv$version
             source $BASEDIR/venv$version/bin/activate
@@ -98,19 +98,20 @@ for version in ${versions[@]}; do
         else
             source $BASEDIR/venv$version/bin/activate
         fi
-        ODOO_CONFIG="$BASEDIR/odoo.conf"
+        ODOO_CONFIG="$branch_dir/odoo.conf"
         if [ -e openerp-server ] ; then
             ODOO_BIN=./openerp-server
         else
             ODOO_BIN=./odoo-bin
         fi
         $ODOO_BIN -d $database_name --db_user $USER -i $MODULES --stop-after-init --save --config $ODOO_CONFIG
+        # remove web_kanban module from config (it's enterprise)
+        sed -i 's/,web_kanban//g' $ODOO_CONFIG
         if [ "$?" == "0" ] ; then
             echo "Install OK, running post install tests"
-            $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $ODOO_CONFIG --test-enable --log-level=test
-            result=$?
-            if [ "$result" != "0" ] ; then
-                echo "Tests installation failed ($result)" 1>&2
+            $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $ODOO_CONFIG --test-enable --log-level=test | tee ../test.log
+            if [ "${PIPESTATUS[0]}" != "0" ] ; then
+                echo "Tests installation failed (${PIPESTATUS[0]})" 1>&2
                 exit 3
             fi
             cd $BASEDIR
