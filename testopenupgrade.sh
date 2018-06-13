@@ -25,6 +25,14 @@ REMOTE=origin
 
 if [ ! -e upgrades ] ; then mkdir upgrades; fi
 
+#find idea runconfigs
+for directory in "." $ODOO_DIR $LOCAL_OPENUPGRADE ; do
+    if [ -e $directory/.idea/runConfigurations ] ; then
+        IDEA_RUN_CONFIGURATIONS_DIR=$BASEDIR/$directory/.idea/runConfigurations
+        echo "Saving idea run configurations to $IDEA_RUN_CONFIGURATIONS_DIR"
+    fi
+done
+
 #preparing openupgrade for local stuff
 LOCAL_OPENUPGRADE_REPO="file://$(pwd)/$LOCAL_OPENUPGRADE"
 sed -i "s/'url': 'git:\/\/github.com\/OpenUpgrade\/OpenUpgrade.git',/'url': '${LOCAL_OPENUPGRADE_REPO//\//\\/}',/g" $LOCAL_OPENUPGRADE/scripts/migrate.py
@@ -32,6 +40,52 @@ sed -i "s/'url': 'git:\/\/github.com\/OpenUpgrade\/OpenUpgrade.git',/'url': '${L
 install_version=$(echo ${versions[@]} | awk '{print $1}')
 to_version=$(echo ${versions[@]} | awk '{print $NF}')
 echo "Testing upgrading module(s) $MODULES from $install_version to $to_version"
+
+function trim() {
+    args="$@"
+    if [ "${args:0:1}" == " " ]; then
+        trim ${args:1}
+    elif [ "${args:$((${#@} - 1))}" == " " ] ; then
+        trim ${args:0:-1}
+    else
+        echo $@
+    fi
+}
+
+function safe_filename() {
+    echo $@ | sed 's/[ \\]/_/g'
+}
+
+function run_and_save_config() {
+    config_name=$1
+    cmd=$@
+    cmd=$(trim ${cmd:${#config_name}})
+    python=$(which python)
+    venv=$(dirname $(dirname $(which python)))
+    pwd=$(pwd)
+    odoo_bin=$(echo "$cmd" | awk '{print $1}')
+    parameters=$(trim ${cmd:${#odoo_bin}})
+
+    # save the command in a script related to the config name
+    filename=$(safe_filename $branch_dir/$config_name.sh)
+    echo -e "#!/bin/bash\ncd $(pwd)\nsource $venv/bin/activate\n$cmd" > $filename
+    chmod +x $filename
+
+    # save a .idea run configuration (e.g. for debugging)
+    if [ "$IDEA_RUN_CONFIGURATIONS_DIR" != "" ] ; then
+        idea_filename=$(safe_filename $IDEA_RUN_CONFIGURATIONS_DIR/${config_name}.xml)
+        echo $idea_filename
+        for variable in "parameters" "pwd" "config_name" "odoo_bin" "venv"; do
+            export $variable="$(eval echo \"\$$variable\")"
+        done
+        cat $BASEDIR/tpl/python_run_configuration.xml | envsubst > $idea_filename
+    fi
+
+    #run the command
+    $cmd 2>&1 | tee ../test.log
+    result=${PIPESTATUS[0]}
+    return $result
+}
 
 for version in ${versions[@]}; do
     major_version=${version:0:-2}
@@ -75,9 +129,10 @@ for version in ${versions[@]}; do
                 # make sure addons directory points to odoo for versions 10 and 11
                 sed -i 's/openerp/odoo/g' $branch_dir/odoo$version.conf
             fi
-            $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $branch_dir/odoo$version.conf --test-enable --log-level=test | tee ../test.log
-            if [ "${PIPESTATUS[0]}" != "0" ] ; then
-                echo "Tests failed after upgrade (${PIPESTATUS[0]})" 1>&2
+            run_and_save_config "$database_name postupgrade test" $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $branch_dir/odoo$version.conf --test-enable --log-level=test
+            result=$?
+            if [ "$result" != "0" ] ; then
+                echo "Tests failed after upgrade ($result)" 1>&2
                 exit 4
             fi
         else
@@ -109,9 +164,10 @@ for version in ${versions[@]}; do
         sed -i 's/,web_kanban//g' $ODOO_CONFIG
         if [ "$?" == "0" ] ; then
             echo "Install OK, running post install tests"
-            $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $ODOO_CONFIG --test-enable --log-level=test | tee ../test.log
-            if [ "${PIPESTATUS[0]}" != "0" ] ; then
-                echo "Tests installation failed (${PIPESTATUS[0]})" 1>&2
+            run_and_save_config "$database_name postinstall test" $ODOO_BIN -d $database_name --db_user $USER -u $MODULES --stop-after-init --config $ODOO_CONFIG --test-enable --log-level=test
+            result=$?
+            if [ "$result" != "0" ] ; then
+                echo "Tests for installation failed ($result)" 1>&2
                 exit 3
             fi
             cd $BASEDIR
